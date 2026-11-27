@@ -1,6 +1,11 @@
 """Read and write inventory using one local JSON file."""
 from contextlib import contextmanager
-import fcntl
+import os
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 import json
 from dataclasses import asdict
 from datetime import date
@@ -87,11 +92,31 @@ def save_inventory(path, inventory):
 
 @contextmanager
 def inventory_session(path):
-    """One macOS session may edit a stock file at a time."""
+    """Allow one session to edit a stock file at a time."""
     lock_path = path.resolve().with_name(path.resolve().name + ".lock")
-    with lock_path.open("a") as lock:
+
+    with lock_path.open("a+b") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("Inventory is open in another window or terminal. Close it and retry.") from None
-        yield
+            if os.name == "nt":
+                lock.seek(0, 2)
+                if lock.tell() == 0:
+                    lock.write(b"\0")
+                    lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        except (BlockingIOError, OSError):
+            raise ValueError(
+                "Inventory is open in another window or terminal. Close it and retry."
+            ) from None
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
